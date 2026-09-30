@@ -1,17 +1,69 @@
+# =============================================================================
+# docker-compose.yml — Dhaka Tesla Pool
+# =============================================================================
+#
+# Orchestrates the full application stack:
+#   1. postgres   — PostgreSQL 17 database
+#   2. backend    — NestJS API (builds from ./backend/Dockerfile)
+#
+# Usage:
+#   Development (Postgres only, backend runs locally via npm):
+#     docker compose up postgres -d
+#
+#   Full stack (both containers):
+#     docker compose up --build
+#
+# Environment variables are read from the .env file in this same directory.
+# The .env file is gitignored; .env.example is committed with safe defaults.
+#
+# Why Docker Compose instead of installing Postgres natively?
+#   → Reproducibility. Every developer gets the exact same Postgres version
+#     (17-alpine) with the exact same config. No "works on my machine."
+#     The volume (postgres_data) persists data across container restarts,
+#     so you don't lose your dev database when you stop the container.
+# =============================================================================
+
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 17 — The only persistent data store.
+  # ---------------------------------------------------------------------------
+  # Alpine variant is smaller (~80MB vs ~400MB for the full image).
+  # The healthcheck ensures dependent services (backend) don't start
+  # until Postgres is actually accepting connections, not just booting.
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:17-alpine
     container_name: dhaka-tesla-pool-postgres
     restart: unless-stopped
+
     environment:
+      # These three env vars tell the official Postgres image to:
+      #   1. Create a database named ${DB_NAME} on first start
+      #   2. Create a superuser with username ${DB_USER}
+      #   3. Set that user's password to ${DB_PASSWORD}
+      # After the first start, these are ignored (data persists in the volume).
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
+
     ports:
+      # Map host port → container port.
+      # This lets the backend (running locally via npm run start:dev)
+      # connect to Postgres at localhost:5432.
+      # Inside Docker networking, other containers use "postgres:5432".
       - "${DB_PORT}:5432"
+
     volumes:
+      # Named volume for data persistence.
+      # Without this, all data would be lost when the container is removed.
+      # `docker compose down` preserves the volume.
+      # `docker compose down -v` destroys it (full reset).
       - postgres_data:/var/lib/postgresql/data
+
     healthcheck:
+      # pg_isready is a Postgres utility that checks if the server
+      # is accepting connections. The healthcheck runs every 5s,
+      # and the backend service won't start until this passes.
       test:
         [
           "CMD-SHELL",
@@ -21,16 +73,31 @@ services:
       timeout: 5s
       retries: 10
 
+  # ---------------------------------------------------------------------------
+  # NestJS Backend API
+  # ---------------------------------------------------------------------------
+  # Builds from ./backend/Dockerfile. In development, you'll typically
+  # run this locally (npm run start:dev) for hot-reload, and only use
+  # this container for Docker-based testing or production-like runs.
+  #
+  # Note: DB_HOST is "postgres" (the service name above), NOT "localhost".
+  # Docker Compose creates a network where services reach each other
+  # by service name. DB_PORT is 5432 (container's internal port),
+  # not the mapped host port.
+  # ---------------------------------------------------------------------------
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: dhaka-tesla-pool-backend
     restart: unless-stopped
+
     environment:
       NODE_ENV: ${NODE_ENV}
       PORT: 5000
 
+      # Inside Docker, the Postgres hostname is the service name "postgres",
+      # not "localhost". This is the key difference from local development.
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${DB_NAME}
@@ -42,11 +109,18 @@ services:
 
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+
     ports:
       - "${PORT}:5000"
+
     depends_on:
+      # Wait for Postgres to be healthy before starting the backend.
+      # Without this, the backend might crash on startup because
+      # the database isn't ready to accept connections yet.
       postgres:
         condition: service_healthy
 
+# Named volumes persist across container restarts.
+# Run `docker compose down -v` to destroy and start fresh.
 volumes:
   postgres_data:
