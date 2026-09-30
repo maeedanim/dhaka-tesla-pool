@@ -1,4 +1,0 @@
-\# Dhaka Tesla Pool — Architecture
-
-
-
